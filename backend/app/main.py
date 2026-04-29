@@ -1,27 +1,64 @@
-# FastAPI 클래스를 가져옴 
-# FastAPI는 파이썬으로 웹 API 서버를 쉽게 만들 수 있게 해주는 도구
+# FastAPI 기본 객체 import
 from fastapi import FastAPI
 
-# FastAPI 앱 객체를 생성
-# title, description, version은 /docs 페이지에서 보이는 정보
+# stations 라우터 import
+from app.api.routes import stations
+
+# Swagger 태그 메타데이터
+tags_metadata = [
+    {
+        "name": "stations",
+        "description": (
+            "역 검색, 역 상세 조회, 엘리베이터 조회, 전화번호 조회 API 모음입니다. "
+            "프론트엔드의 역 검색 페이지와 상세 페이지에서 사용하는 기본 API입니다."
+        ),
+    },
+    {
+        "name": "default",
+        "description": "기본 확인용 API입니다.",
+    },
+]
+
+# FastAPI 앱 생성
 app = FastAPI(
-    title="Mobility Bridge API",                 # API 이름
-    description="교통약자 이동 지원 백엔드 API",   # API 설명
-    version="0.1.0"                              # 현재 버전
+    title="Mobility Bridge API",
+    description="""
+교통약자를 위한 지하철 무장애 이동 지원 백엔드 API입니다.
+
+주요 기능:
+- 역 검색
+- 역 상세 정보 조회
+- 역 주변 엘리베이터 위치 조회
+- 역 전화번호 조회
+
+현재 문서는 프론트엔드 연동을 위한 기본 조회 API를 중심으로 구성되어 있습니다.
+""",
+    version="0.1.0",
+    openapi_tags=tags_metadata,
+    contact={
+        "name": "Mobility Bridge Team"
+    },
 )
 
+# stations 라우터 등록
+app.include_router(stations.router)
 
-# 기본 주소("/")에 접속했을 때 실행되는 API
-# 브라우저에서 http://127.0.0.1:8000/ 로 들어가면 이 함수가 실행됨 
-@app.get("/")
+# 루트 페이지
+@app.get(
+    "/",
+    tags=["default"],
+    summary="루트 확인",
+    description="서버가 정상 실행 중인지 확인합니다."
+)
 def read_root():
-    # JSON 형태로 메시지를 반환함 
     return {"message": "Mobility Bridge backend is running!"}
 
-
-# 서버가 정상적으로 살아있는지 확인하는 API
-# 보통 health check(헬스 체크)라고 부름 
-@app.get("/health")
+# 헬스 체크 API
+@app.get(
+    "/health",
+    tags=["default"],
+    summary="헬스 체크",
+    description="서버 상태를 간단히 확인합니다."
+)
 def health_check():
-    # 서버 상태를 간단히 반환함
     return {"status": "ok"}
