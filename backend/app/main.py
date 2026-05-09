@@ -4,11 +4,23 @@ from fastapi import FastAPI
 # JSON 응답 형식을 명시적으로 제어하기 위한 클래스 import
 from fastapi.responses import JSONResponse
 
+# CORS 미들웨어 import (프론트엔드 연동을 위해 필수)
+from fastapi.middleware.cors import CORSMiddleware
+
 # stations 라우터 import
 from app.api.routes.stations import router as stations_router
 
 # mobility 라우터 import
 from app.api.routes.mobility import router as mobility_router
+
+# AI 라우터 import (4주차 목표를 위해 추가)
+# 만약 아직 ai.py 파일이 없다면 이 줄을 주석처리하고 나중에 활성화
+try:
+    from app.api.routes.ai import router as ai_router
+    AI_ROUTER_AVAILABLE = True
+except ImportError:
+    AI_ROUTER_AVAILABLE = False
+    print("AI 라우터를 찾을 수 없습니다. 나중에 추가하세요.")
 
 
 # ---------------------------------------------------
@@ -35,6 +47,16 @@ tags_metadata = [
     },
 ]
 
+# AI 라우터가 있으면 태그 메타데이터에 추가
+if AI_ROUTER_AVAILABLE:
+    tags_metadata.append({
+        "name": "AI 추천",
+        "description": (
+            "교통약자 이동 추천 API입니다. "
+            "사용자 유형과 지역 정보를 바탕으로 이동지원센터 추천 및 행동 가이드를 제공합니다."
+        ),
+    })
+
 
 # ---------------------------------------------------
 # FastAPI 앱 생성
@@ -50,6 +72,7 @@ app = FastAPI(
 - 역 주변 엘리베이터 위치 조회
 - 역 전화번호 조회
 - 교통약자 이동지원센터 조회
+- 교통약자 이동 추천 (규칙 기반, AI 라우터 있을 때)
 
 공통 응답 형식:
 - success: 요청 성공 여부
@@ -58,7 +81,7 @@ app = FastAPI(
 - meta: 부가 정보
 - error: 에러 정보
 """,
-    version="1.1.0",
+    version="1.2.0",
     openapi_tags=tags_metadata,
     contact={
         "name": "Mobility Bridge Team"
@@ -66,6 +89,18 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
+)
+
+
+# ---------------------------------------------------
+# CORS 미들웨어 설정 (반드시 라우터 등록보다 먼저!)
+# ---------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],          # 모든 도메인에서 요청 허용 (테스트용)
+    allow_credentials=False,      # ⚠️ 중요: allow_origins=["*"]일 때는 반드시 False
+    allow_methods=["*"],          # 모든 HTTP 메서드 허용
+    allow_headers=["*"],          # 모든 HTTP 헤더 허용
 )
 
 
@@ -78,6 +113,12 @@ app.include_router(stations_router)
 # mobility 라우터 등록
 # ---------------------------------------------------
 app.include_router(mobility_router)
+
+# ---------------------------------------------------
+# AI 라우터 등록 (있는 경우에만)
+# ---------------------------------------------------
+if AI_ROUTER_AVAILABLE:
+    app.include_router(ai_router)
 
 
 # ---------------------------------------------------
@@ -100,9 +141,10 @@ async def read_root():
             "message": "Mobility Bridge backend is running!",
             "data": {
                 "service": "Mobility Bridge API",
-                "version": "1.1.0",
+                "version": "1.2.0",
                 "docsUrl": "/docs",
                 "redocUrl": "/redoc",
+                "aiRouterAvailable": AI_ROUTER_AVAILABLE,  # AI 라우터 상태 표시
             },
             "meta": {},
             "error": None,
@@ -129,7 +171,9 @@ async def health_check():
             "success": True,
             "message": "서버 상태가 정상입니다.",
             "data": {
-                "status": "ok"
+                "status": "ok",
+                "corsEnabled": True,
+                "availableRouters": ["stations", "mobility"] + (["ai"] if AI_ROUTER_AVAILABLE else [])
             },
             "meta": {},
             "error": None,
