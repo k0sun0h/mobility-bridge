@@ -309,3 +309,118 @@ async def save_prediction_log(
     except Exception as e:
         # 로그 저장 실패가 추천 결과에 영향을 주지 않도록 처리
         print(f"prediction_log 저장 실패 (추천은 정상 진행): {e}")
+
+# -------------------------------------------------------
+# 5주차 : ML 모델 import
+# -------------------------------------------------------
+from app.ml.shap_explainer import build_input_features, explain_prediction
+from app.schemas.ai import MLRecommendRequest
+
+# -------------------------------------------------------
+# 5주차 : ML 기반 추천 API
+# -------------------------------------------------------
+@router.post(
+    "/recommend-ml",
+    summary="AI 머신러닝 기반 추천",
+    description=(
+        "RandomForest 분류/회귀 모델과 SHAP 설명을 사용한 AI 기반 추천입니다. "
+        "편의성 등급, 예상 대기시간, 추천 이유를 함께 반환합니다."
+    ),
+)
+async def get_ml_recommendation(request: MLRecommendRequest):
+    """
+    5주차 핵심: ML 모델 예측 + SHAP 설명
+    """
+    try:
+        # 1. API 요청을 ML 입력 피처로 변환
+        input_df = build_input_features(
+            user_type=request.userType,
+            elevator_count=request.elevatorCount,
+            available_vehicles=request.availableVehicles,
+            waiting_count=request.waitingCount,
+            has_phone=request.hasPhone,
+            with_caregiver=request.withCaregiver,
+            need_parking=request.needParking,
+            parking_available=request.parkingAvailable,
+            time_slot=request.timeSlot,
+        )
+
+        # 2. ML 예측 + SHAP 설명 실행
+        ml_result = explain_prediction(input_df)
+
+        # 3. 응답 데이터 구성
+        return success_response(
+            message="AI 기반 추천이 완료되었습니다.",
+            data={
+                "convenienceLevel": ml_result["convenience_level"],
+                "convenienceLevelKo": ml_result["convenience_level_ko"],
+                "confidence": ml_result["confidence"],
+                "predictedWaitTime": ml_result["predicted_wait_time"],
+                "topFeatures": ml_result["top_features"],
+                "explanationSentences": ml_result["explanation_sentences"],
+            },
+            meta={
+                "userType": request.userType,
+                "modelVersion": "1.0",
+                "shapEnabled": True,
+            },
+        )
+
+    except FileNotFoundError:
+        return error_response(
+            status_code=503,
+            message="AI 모델 파일이 없습니다. 먼저 python -m app.ml.train을 실행하세요.",
+            error_code="MODEL_NOT_FOUND",
+            detail="data/models/ 폴더에 모델 파일이 필요합니다.",
+        )
+    except Exception as e:
+        return error_response(
+            status_code=500,
+            message="AI 추천 처리 중 오류가 발생했습니다.",
+            error_code="ML_RECOMMEND_FAILED",
+            detail=str(e),
+        )
+
+# -------------------------------------------------------
+# 5주차 : SHAP 상세 설명 API (선택사항)
+# -------------------------------------------------------
+@router.post(
+    "/explain",
+    summary="SHAP 상세 설명",
+    description="입력 조건에 대한 SHAP 기반 상세 설명을 반환합니다.",
+)
+async def get_shap_explanation(request: MLRecommendRequest):
+    """SHAP 설명에 집중한 API (정인님의 설명 카드 페이지용)"""
+    try:
+        input_df = build_input_features(
+            user_type=request.userType,
+            elevator_count=request.elevatorCount,
+            available_vehicles=request.availableVehicles,
+            waiting_count=request.waitingCount,
+            has_phone=request.hasPhone,
+            with_caregiver=request.withCaregiver,
+            need_parking=request.needParking,
+            parking_available=request.parkingAvailable,
+            time_slot=request.timeSlot,
+        )
+
+        ml_result = explain_prediction(input_df)
+
+        return success_response(
+            message="SHAP 설명이 생성되었습니다.",
+            data={
+                "topFeatures": ml_result["top_features"],
+                "explanationSentences": ml_result["explanation_sentences"],
+                "convenienceLevel": ml_result["convenience_level"],
+                "convenienceLevelKo": ml_result["convenience_level_ko"],
+                "confidence": ml_result["confidence"],
+            },
+        )
+
+    except Exception as e:
+        return error_response(
+            status_code=500,
+            message="SHAP 설명 생성 중 오류가 발생했습니다.",
+            error_code="SHAP_EXPLAIN_FAILED",
+            detail=str(e),
+        )
