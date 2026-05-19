@@ -1,5 +1,6 @@
 # FastAPI 관련 기능 import
 from fastapi import APIRouter, Query, Path, HTTPException
+from fastapi.responses import JSONResponse
 
 # 서비스 함수 import
 from app.services.station_service import (

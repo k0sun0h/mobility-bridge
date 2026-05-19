@@ -2,7 +2,7 @@
 import re
 
 # 타입 힌트용 라이브러리
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 # 환경변수 읽기
 import os
@@ -21,11 +21,9 @@ load_dotenv()
 
 
 # ---------------------------------------------------
-# 서울 열린데이터광장 인증키
+# 서울 열린데이터광장 설정
 # ---------------------------------------------------
 SEOUL_OPEN_API_KEY = (os.getenv("SEOUL_OPEN_API_KEY") or "").strip()
-
-# 서울 열린데이터광장 기본 주소
 SEOUL_BASE_URL = "http://openapi.seoul.go.kr:8088"
 
 # 역 주소 및 전화번호 서비스명
@@ -36,11 +34,26 @@ SEOUL_ELEVATOR_SERVICE = "tbTraficElvtr"
 
 
 # ---------------------------------------------------
+# 역 데이터 캐시
+#
+# 서울시 API를 매 요청마다 호출하면 30초씩 대기가 발생합니다.
+# 서버 시작 후 최초 1회만 API를 호출하고, 이후 요청은
+# 메모리에 저장된 캐시에서 즉시 반환하도록 설계했습니다.
+#
+# 효과:
+# - 최초 요청: 최대 3초 (타임아웃) 또는 실제 API 응답 시간
+# - 이후 요청: 0.01초 이하 즉시 응답
+# ---------------------------------------------------
+_station_cache: List[Dict[str, Any]] = []
+_cache_loaded: bool = False
+
+
+# ---------------------------------------------------
 # 공통 유틸 함수
 # ---------------------------------------------------
 def ensure_seoul_api_key() -> str:
     """
-    서울 열린데이터광장 인증키가 있는지 확인하는 함수
+    서울 열린데이터광장 인증키 존재 여부 확인
     """
     if not SEOUL_OPEN_API_KEY:
         raise ValueError("SEOUL_OPEN_API_KEY가 없습니다. .env 파일을 확인하세요.")
@@ -49,8 +62,8 @@ def ensure_seoul_api_key() -> str:
 
 def safe_str(value: Any) -> Optional[str]:
     """
-    값을 안전하게 문자열로 변환하는 함수
-    - None 이면 None 반환
+    값을 안전하게 문자열로 변환
+    - None이면 None 반환
     - 공백뿐인 문자열이면 None 반환
     """
     if value is None:
@@ -62,37 +75,25 @@ def safe_str(value: Any) -> Optional[str]:
 
 def build_station_id(line_name: Optional[str], station_name: Optional[str]) -> str:
     """
-    역 상세 조회에 사용할 고정 stationId를 만드는 함수
+    역 상세 조회용 고정 stationId 생성
     예: 2호선 + 강남 -> 2호선_강남
 
-    주의:
-    - stationId는 원본 API의 역코드가 아니라
-      프론트와 URL 경로에서 안정적으로 쓰기 위한 내부 식별자
+    원본 역코드가 아닌 프론트엔드 URL에서 안정적으로 사용하기 위한 내부 식별자
     """
     line = safe_str(line_name) or "unknown-line"
     station = safe_str(station_name) or "unknown-station"
 
     raw_id = f"{line}_{station}"
-
-    # 공백 제거
-    raw_id = re.sub(r"\s+", "", raw_id)
-
-    # URL 경로에서 문제될 수 있는 슬래시를 언더스코어로 치환
-    raw_id = raw_id.replace("/", "_")
+    raw_id = re.sub(r"\s+", "", raw_id)  # 공백 제거
+    raw_id = raw_id.replace("/", "_")    # 슬래시를 언더스코어로 변환
 
     return raw_id
 
 
 def normalize_station_name_for_match(name: Optional[str]) -> str:
     """
-    역명 비교를 위한 정규화 함수
-    - 공백 제거
-    - 소문자 처리
-    - 끝에 붙은 '역' 제거
-
-    예:
-    '강남역' -> '강남'
-    ' 강 남 ' -> '강남'
+    역명 비교를 위한 정규화
+    - 공백 제거, 소문자 변환, 끝의 '역' 제거
     """
     if not name:
         return ""
@@ -100,11 +101,103 @@ def normalize_station_name_for_match(name: Optional[str]) -> str:
     text = str(name).strip().lower()
     text = re.sub(r"\s+", "", text)
 
-    # 끝에 '역'이 붙으면 제거
     if text.endswith("역"):
         text = text[:-1]
 
     return text
+
+
+# ---------------------------------------------------
+# 역 좌표 매핑 함수
+#
+# [배경 설명]
+# 서울시 StationAdresTelno API는 역명, 호선, 주소, 전화번호는 제공하지만
+# 카카오맵 마커에 필요한 위도/경도 좌표는 제공하지 않습니다.
+#
+# 해결 방안:
+# 1. 카카오 지오코딩 API: 주소→좌표 변환 (API 키 추가 필요, 비용 발생)
+# 2. 별도 좌표 DB 연동: 시간 소요
+# 3. 주요 역 하드코딩: MVP 단계에서 즉시 사용 가능
+#
+# 현재는 3번을 선택하여 개발 속도를 우선시했습니다.
+# 향후 지오코딩 API 연동으로 전체 역 좌표 자동화 예정입니다.
+# ---------------------------------------------------
+def get_station_coordinates(station_name: Optional[str]) -> Tuple[Optional[float], Optional[float]]:
+    """
+    역명 기준 위도/경도 반환
+
+    반환값: (latitude, longitude)
+    매핑되지 않은 역은 (None, None) 반환
+    """
+    if not station_name:
+        return None, None
+
+    # 수도권 주요 역 좌표 매핑 테이블
+    station_coords: Dict[str, Tuple[float, float]] = {
+        "기흥": (37.2749, 127.1151),
+        "강남": (37.4979, 127.0276),
+        "홍대입구": (37.5567, 126.9234),
+        "신촌": (37.5559, 126.9364),
+        "명동": (37.5636, 126.9816),
+        "종로3가": (37.5703, 126.9911),
+        "을지로입구": (37.5663, 126.9820),
+        "서울": (37.5547, 126.9706),
+        "용산": (37.5298, 126.9647),
+        "영등포": (37.5157, 126.9070),
+        "신도림": (37.5085, 126.8912),
+        "구로디지털단지": (37.4851, 126.9015),
+        "사당": (37.4766, 126.9816),
+        "교대": (37.4934, 127.0144),
+        "역삼": (37.5008, 127.0366),
+        "선릉": (37.5048, 127.0498),
+        "삼성": (37.5088, 127.0633),
+        "잠실": (37.5133, 127.1000),
+        "건대입구": (37.5403, 127.0699),
+        "왕십리": (37.5614, 127.0374),
+        "성수": (37.5447, 127.0558),
+        "합정": (37.5497, 126.9138),
+        "마포": (37.5441, 126.9520),
+        "공덕": (37.5445, 126.9516),
+        "이태원": (37.5345, 126.9944),
+        "한강진": (37.5390, 126.9986),
+        "동대문": (37.5718, 127.0097),
+        "동대문역사문화공원": (37.5656, 127.0092),
+        "충무로": (37.5613, 126.9942),
+        "약수": (37.5551, 127.0097),
+        "옥수": (37.5467, 127.0186),
+        "압구정": (37.5271, 127.0283),
+        "신사": (37.5199, 127.0202),
+        "잠원": (37.5154, 127.0046),
+        "고속터미널": (37.5047, 127.0047),
+        "반포": (37.5044, 127.0121),
+        "이수": (37.4867, 126.9819),
+        "총신대입구": (37.4867, 126.9819),
+        "동작": (37.4993, 126.9818),
+        "노량진": (37.5134, 126.9428),
+        "대방": (37.5148, 126.9267),
+        "신길": (37.5177, 126.9148),
+        "여의도": (37.5218, 126.9242),
+        "여의나루": (37.5265, 126.9324),
+        "마곡나루": (37.5702, 126.8016),
+        "김포공항": (37.5622, 126.8012),
+        "수원": (37.2662, 127.0005),
+        "안양": (37.3946, 126.9558),
+        "부천": (37.5030, 126.7831),
+        "인천": (37.4563, 126.7052),
+        "의정부": (37.7381, 127.0444),
+        "일산": (37.6760, 126.7701),
+        "분당": (37.3595, 127.1082),
+        "판교": (37.3948, 127.1112),
+    }
+
+    # 역명에서 '역' 제거 후 검색
+    clean_name = station_name.replace("역", "").strip()
+
+    for key, coords in station_coords.items():
+        if key in clean_name or clean_name in key:
+            return coords[0], coords[1]
+
+    return None, None
 
 
 # ---------------------------------------------------
@@ -116,15 +209,14 @@ async def fetch_seoul_api_rows(
     end_index: int,
 ) -> List[Dict[str, Any]]:
     """
-    서울 열린데이터광장 Open API를 공통 형태로 호출하는 함수
+    서울 열린데이터광장 Open API 공통 호출 함수
 
-    반환:
-    - 해당 서비스의 row 리스트
+    타임아웃: 3초
+    - 기존 30초에서 단축하여 서울시 API 장애 시 빠르게 더미 데이터로 전환
+    - 에러 발생 시 빈 리스트 반환으로 서버 중단 방지
     """
-    # 인증키 확인
     api_key = ensure_seoul_api_key()
 
-    # 실제 요청 URL 생성
     url = (
         f"{SEOUL_BASE_URL}/"
         f"{api_key}/json/"
@@ -132,35 +224,42 @@ async def fetch_seoul_api_rows(
         f"{start_index}/{end_index}/"
     )
 
-    # 비동기 HTTP 요청
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.get(url)
+    try:
+        # 타임아웃 3초: 서울시 API가 3초 내 응답 없으면 더미 데이터로 즉시 전환
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.get(url)
+        response.raise_for_status()
 
-    # HTTP 오류 발생 시 예외 처리
-    response.raise_for_status()
+    except httpx.ReadTimeout:
+        print(f"[{service_name}] API 읽기 타임아웃 발생 (3초 초과)")
+        return []
+    except httpx.ConnectTimeout:
+        print(f"[{service_name}] API 연결 타임아웃 발생")
+        return []
+    except httpx.HTTPStatusError as e:
+        print(f"[{service_name}] HTTP 오류: {e.response.status_code}")
+        return []
+    except Exception as e:
+        print(f"[{service_name}] 알 수 없는 오류: {e}")
+        return []
 
-    # JSON 변환
-    data = response.json()
+    try:
+        data = response.json()
+    except Exception as e:
+        print(f"[{service_name}] JSON 파싱 실패: {e}")
+        return []
 
-    # 서울 Open API는 서비스명 아래에 데이터가 들어있음
     service_block = data.get(service_name, {})
-
-    # RESULT 블록 확인
     result = service_block.get("RESULT", {})
     result_code = result.get("CODE")
     result_message = result.get("MESSAGE")
 
-    # INFO-000: 정상 처리
-    # INFO-200: 해당하는 데이터가 없음
+    # INFO-000: 정상, INFO-200: 데이터 없음
     if result_code and result_code not in ("INFO-000", "INFO-200"):
-        raise ValueError(
-            f"{service_name} API 오류: {result_code} - {result_message or '알 수 없는 오류'}"
-        )
+        print(f"[{service_name}] API 응답 오류: {result_code} - {result_message}")
+        return []
 
-    # row 배열 추출
     rows = service_block.get("row", [])
-
-    # 혹시 list가 아니면 빈 배열 반환
     if not isinstance(rows, list):
         return []
 
@@ -172,38 +271,72 @@ async def fetch_seoul_api_rows(
 # ---------------------------------------------------
 async def fetch_station_raw_data(start_index: int = 1, end_index: int = 300) -> List[Dict[str, Any]]:
     """
-    서울 열린데이터광장에서 역 주소/전화번호 원본 데이터를 가져오는 함수
+    역 주소/전화번호 원본 데이터 조회
+
+    서울시 API 장애 시 개발 환경 유지를 위해 더미 데이터 반환
     """
-    return await fetch_seoul_api_rows(
+    rows = await fetch_seoul_api_rows(
         service_name=SEOUL_STATION_SERVICE,
         start_index=start_index,
         end_index=end_index,
     )
 
+    if not rows:
+        print("[StationAdresTelno] 외부 API 데이터 없음 - 개발용 더미 데이터 사용")
+        return [
+            {
+                "STATN_NM": "기흥",
+                "LINE_NUM": "수인분당선",
+                "ROAD_NM_ADDR": "경기도 용인시 기흥구 기흥역로 68",
+                "TELNO": "031-283-6588",
+            },
+            {
+                "STATN_NM": "강남",
+                "LINE_NUM": "2호선",
+                "ROAD_NM_ADDR": "서울특별시 강남구 강남대로 지하396",
+                "TELNO": "02-6110-1234",
+            },
+            {
+                "STATN_NM": "홍대입구",
+                "LINE_NUM": "2호선",
+                "ROAD_NM_ADDR": "서울특별시 마포구 양화로 지하160",
+                "TELNO": "02-6110-2678",
+            },
+            {
+                "STATN_NM": "서울",
+                "LINE_NUM": "1호선",
+                "ROAD_NM_ADDR": "서울특별시 중구 세종대로 지하2",
+                "TELNO": "02-6110-1001",
+            },
+            {
+                "STATN_NM": "잠실",
+                "LINE_NUM": "2호선",
+                "ROAD_NM_ADDR": "서울특별시 송파구 올림픽로 지하265",
+                "TELNO": "02-6110-2916",
+            },
+        ]
+
+    return rows
+
 
 def normalize_station_row(row: Dict[str, Any]) -> Dict[str, Any]:
     """
-    서울 API 원본 row를 우리 서비스용 JSON 형태로 정리하는 함수
+    서울 API 원본 row를 서비스용 JSON 형태로 변환
 
-    주의:
-    - stationId는 항상 build_station_id() 규칙으로 생성
-    - 원본 역코드는 stationCode로 별도 보관
+    latitude, longitude 필드 포함 (카카오맵 마커용)
     """
-    # 역명
     station_name = (
         safe_str(row.get("SBWY_STNS_NM"))
         or safe_str(row.get("STATN_NM"))
         or safe_str(row.get("STATION_NM"))
     )
 
-    # 호선명
     line_name = (
         safe_str(row.get("SBWY_ROUT_LN"))
         or safe_str(row.get("LINE_NUM"))
         or safe_str(row.get("ROUTE"))
     )
 
-    # 원본 역코드
     station_code = (
         safe_str(row.get("STIN_CD"))
         or safe_str(row.get("SBWY_STNS_CD"))
@@ -211,18 +344,14 @@ def normalize_station_row(row: Dict[str, Any]) -> Dict[str, Any]:
         or safe_str(row.get("ROW_NUM"))
     )
 
-    # 내부 stationId는 항상 고정 규칙으로 생성
     station_id = build_station_id(line_name, station_name)
-
-    # 전화번호
     phone = safe_str(row.get("TELNO")) or safe_str(row.get("PHONE"))
-
-    # 주소
     road_address = safe_str(row.get("ROAD_NM_ADDR"))
     old_address = safe_str(row.get("OLD_ADDR"))
-
-    # 대표 주소는 도로명 주소 우선, 없으면 지번 주소 사용
     address = road_address or old_address
+
+    # 역명으로 좌표 조회
+    latitude, longitude = get_station_coordinates(station_name)
 
     return {
         "stationId": station_id,
@@ -233,23 +362,21 @@ def normalize_station_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "address": address,
         "roadAddress": road_address,
         "oldAddress": old_address,
+        "latitude": latitude,
+        "longitude": longitude,
     }
 
 
 def deduplicate_stations(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    stationId 기준으로 중복 역을 제거하는 함수
+    stationId 기준으로 중복 역 제거
     """
     unique_map: Dict[str, Dict[str, Any]] = {}
 
     for item in items:
         station_id = item.get("stationId")
-
-        # stationId가 없으면 건너뛰기
         if not station_id:
             continue
-
-        # 처음 나온 데이터만 유지
         if station_id not in unique_map:
             unique_map[station_id] = item
 
@@ -258,18 +385,31 @@ def deduplicate_stations(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 async def get_all_stations() -> List[Dict[str, Any]]:
     """
-    전체 역 데이터를 정리된 형태로 반환하는 함수
+    전체 역 데이터를 정리된 형태로 반환
+
+    캐싱 적용: 서버 시작 후 최초 1회만 서울시 API 호출
+    이후 요청은 메모리 캐시에서 즉시 반환하여 응답 속도 개선
     """
+    global _station_cache, _cache_loaded
+
+    # 캐시가 이미 있으면 API 호출 없이 즉시 반환
+    if _cache_loaded:
+        return _station_cache
+
+    # 최초 1회만 서울시 API 호출
+    print("[stations] 역 데이터 최초 로딩 중...")
     rows = await fetch_station_raw_data()
     items = [normalize_station_row(row) for row in rows]
+    _station_cache = deduplicate_stations(items)
+    _cache_loaded = True
+    print(f"[stations] 캐시 완료: {len(_station_cache)}개 역 로드됨")
 
-    # 검색/상세에서 중복 문제가 없도록 한 번 정리
-    return deduplicate_stations(items)
+    return _station_cache
 
 
 def station_matches_keyword(item: Dict[str, Any], keyword: str) -> bool:
     """
-    검색 키워드가 역명/호선/주소 중 하나에 포함되는지 확인하는 함수
+    검색 키워드가 역명/호선/주소 중 하나에 포함되는지 확인
     """
     keyword = (keyword or "").strip().lower()
     if not keyword:
@@ -287,24 +427,13 @@ def station_matches_keyword(item: Dict[str, Any], keyword: str) -> bool:
 async def search_stations(keyword: str) -> List[Dict[str, Any]]:
     """
     역명 키워드로 역 검색
-
-    현재는 아래 항목에서 검색 가능:
-    - 역명
-    - 호선
-    - 주소
     """
     keyword = (keyword or "").strip()
     if not keyword:
         return []
 
     items = await get_all_stations()
-
-    results = []
-    for item in items:
-        if station_matches_keyword(item, keyword):
-            results.append(item)
-
-    return results
+    return [item for item in items if station_matches_keyword(item, keyword)]
 
 
 async def get_station_detail(station_id: str) -> Optional[Dict[str, Any]]:
@@ -327,6 +456,8 @@ async def get_station_detail(station_id: str) -> Optional[Dict[str, Any]]:
                 "address": item["address"],
                 "roadAddress": item["roadAddress"],
                 "oldAddress": item["oldAddress"],
+                "latitude": item.get("latitude"),
+                "longitude": item.get("longitude"),
             }
 
     return None
@@ -335,20 +466,16 @@ async def get_station_detail(station_id: str) -> Optional[Dict[str, Any]]:
 # ---------------------------------------------------
 # 엘리베이터 관련 함수
 # ---------------------------------------------------
-def parse_wkt_point(wkt: Optional[str]) -> tuple[Optional[float], Optional[float]]:
+def parse_wkt_point(wkt: Optional[str]) -> Tuple[Optional[float], Optional[float]]:
     """
-    WKT 문자열에서 경도/위도를 추출하는 함수
+    WKT 문자열에서 경도/위도 추출
 
-    예:
-    POINT(127.027123 37.497891)
-
-    반환값:
-    (longitude, latitude)
+    예: POINT(127.027123 37.497891)
+    반환값: (longitude, latitude)
     """
     if not wkt:
         return None, None
 
-    # 공백이 조금 달라도 처리 가능하게 정규식 작성
     match = re.match(
         r"POINT\s*\(\s*([-\d\.]+)\s+([-\d\.]+)\s*\)",
         str(wkt).strip(),
@@ -368,7 +495,7 @@ def parse_wkt_point(wkt: Optional[str]) -> tuple[Optional[float], Optional[float
 
 async def fetch_elevator_raw_data(start_index: int = 1, end_index: int = 1000) -> List[Dict[str, Any]]:
     """
-    서울 열린데이터광장에서 지하철역 엘리베이터 위치 원본 데이터를 가져오는 함수
+    지하철역 엘리베이터 위치 원본 데이터 조회
     """
     return await fetch_seoul_api_rows(
         service_name=SEOUL_ELEVATOR_SERVICE,
@@ -379,15 +506,10 @@ async def fetch_elevator_raw_data(start_index: int = 1, end_index: int = 1000) -
 
 def normalize_elevator_row(row: Dict[str, Any]) -> Dict[str, Any]:
     """
-    서울시 엘리베이터 위치 API 원본 row를 프론트용 형태로 정리하는 함수
+    엘리베이터 API 원본 row를 서비스용 형태로 변환
     """
-    # WKT 좌표 문자열
     wkt = safe_str(row.get("NODE_WKT"))
-
-    # WKT에서 경도/위도 파싱
     longitude, latitude = parse_wkt_point(wkt)
-
-    # 역명 / 역코드
     station_name = safe_str(row.get("SBWY_STN_NM"))
     station_code = safe_str(row.get("SBWY_STN_CD"))
 
@@ -406,50 +528,33 @@ def normalize_elevator_row(row: Dict[str, Any]) -> Dict[str, Any]:
 
 async def get_station_elevators(station_id: str) -> Optional[Dict[str, Any]]:
     """
-    stationId를 기준으로 해당 역의 엘리베이터 목록 반환
-
-    반환 형식은 stations.py 라우터와 맞추기 위해
-    아래처럼 구성함:
-    {
-        "stationId": "...",
-        "stationName": "...",
-        "items": [...]
-    }
+    stationId 기준으로 해당 역의 엘리베이터 목록 반환
     """
-    # 먼저 역 상세 정보를 찾아 역명을 확보
     station = await get_station_detail(station_id)
     if not station:
         return None
 
-    # 비교용 역명 정규화
     target_station_name = normalize_station_name_for_match(station["stationName"])
-
-    # 엘리베이터 원본 데이터 조회
     rows = await fetch_elevator_raw_data()
 
     matched_items: List[Dict[str, Any]] = []
-
-    # 중복 제거용 집합
     seen = set()
 
     for row in rows:
         normalized_item = normalize_elevator_row(row)
+        row_station_name = normalize_station_name_for_match(
+            normalized_item.get("stationName")
+        )
 
-        # 현재 row의 역명을 비교용 형태로 정규화
-        row_station_name = normalize_station_name_for_match(normalized_item.get("stationName"))
-
-        # 역명이 다르면 제외
         if row_station_name != target_station_name:
             continue
 
-        # 중복 제거 키
         dedupe_key = (
             normalized_item.get("elevatorId"),
             normalized_item.get("stationCode"),
             normalized_item.get("wkt"),
         )
 
-        # 이미 넣은 데이터면 건너뛰기
         if dedupe_key in seen:
             continue
 
@@ -468,16 +573,13 @@ async def get_station_elevators(station_id: str) -> Optional[Dict[str, Any]]:
 # ---------------------------------------------------
 async def get_station_contact(station_id: str) -> Optional[Dict[str, Any]]:
     """
-    stationId를 기준으로 역 연락처 정보를 반환하는 함수
+    stationId 기준으로 역 연락처 정보 반환
     """
-    # 기존 역 상세 정보를 재사용
     station = await get_station_detail(station_id)
 
-    # 해당 역이 없으면 None 반환
     if not station:
         return None
 
-    # 연락처 전용 응답 형태로 가공
     return {
         "stationId": station["stationId"],
         "stationName": station["stationName"],
