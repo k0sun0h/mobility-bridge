@@ -13,6 +13,9 @@ from app.api.routes.stations import router as stations_router
 # mobility 라우터 import
 from app.api.routes.mobility import router as mobility_router
 
+# feedback 라우터 import (피드백 저장용)
+from app.api.routes.feedback import router as feedback_router
+
 # AI 라우터 import (4주차 목표를 위해 추가)
 # 만약 아직 ai.py 파일이 없다면 이 줄을 주석처리하고 나중에 활성화
 try:
@@ -45,6 +48,13 @@ tags_metadata = [
             "현재는 center_info_v2 기반 센터 조회 API를 우선 제공합니다."
         ),
     },
+    {
+        "name": "피드백",
+        "description": (
+            "경로 이용 후 사용자 피드백(별점, 불편사항, 추가 의견) 저장 API입니다. "
+            "수집된 피드백은 서비스 품질 개선 및 AI 모델 고도화에 활용됩니다."
+        ),
+    },
 ]
 
 # AI 라우터가 있으면 태그 메타데이터에 추가
@@ -73,6 +83,7 @@ app = FastAPI(
 - 역 전화번호 조회
 - 교통약자 이동지원센터 조회
 - 교통약자 이동 추천 (규칙 기반, AI 라우터 있을 때)
+- 경로 이용 후 사용자 피드백 저장
 
 공통 응답 형식:
 - success: 요청 성공 여부
@@ -81,7 +92,7 @@ app = FastAPI(
 - meta: 부가 정보
 - error: 에러 정보
 """,
-    version="1.2.0",
+    version="1.3.0",
     openapi_tags=tags_metadata,
     contact={
         "name": "Mobility Bridge Team"
@@ -98,7 +109,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],          # 모든 도메인에서 요청 허용 (테스트용)
-    allow_credentials=False,      # ⚠️ 중요: allow_origins=["*"]일 때는 반드시 False
+    allow_credentials=False,      # allow_origins=["*"]일 때는 반드시 False
     allow_methods=["*"],          # 모든 HTTP 메서드 허용
     allow_headers=["*"],          # 모든 HTTP 헤더 허용
 )
@@ -113,6 +124,11 @@ app.include_router(stations_router)
 # mobility 라우터 등록
 # ---------------------------------------------------
 app.include_router(mobility_router)
+
+# ---------------------------------------------------
+# feedback 라우터 등록
+# ---------------------------------------------------
+app.include_router(feedback_router)
 
 # ---------------------------------------------------
 # AI 라우터 등록 (있는 경우에만)
@@ -141,7 +157,7 @@ async def read_root():
             "message": "Mobility Bridge backend is running!",
             "data": {
                 "service": "Mobility Bridge API",
-                "version": "1.2.0",
+                "version": "1.3.0",
                 "docsUrl": "/docs",
                 "redocUrl": "/redoc",
                 "aiRouterAvailable": AI_ROUTER_AVAILABLE,  # AI 라우터 상태 표시
@@ -173,7 +189,7 @@ async def health_check():
             "data": {
                 "status": "ok",
                 "corsEnabled": True,
-                "availableRouters": ["stations", "mobility"] + (["ai"] if AI_ROUTER_AVAILABLE else [])
+                "availableRouters": ["stations", "mobility", "feedback"] + (["ai"] if AI_ROUTER_AVAILABLE else [])
             },
             "meta": {},
             "error": None,
