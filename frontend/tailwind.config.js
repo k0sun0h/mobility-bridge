@@ -1,0 +1,12 @@
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: [
+    "./src/**/*.{js,ts,jsx,tsx,mdx}",
+  ],
+  theme: {
+    extend: {},
+  },
+  plugins: [
+    require("tw-animate-css"), // 👈 에러 나던 플러그인을 여기서 등록합니다.
+  ],
+}
