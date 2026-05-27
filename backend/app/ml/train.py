@@ -131,8 +131,11 @@ def preprocess_features(df: pd.DataFrame) -> pd.DataFrame:
     
     # 사용자 유형 인코딩 (중요도 순서 반영)
     user_type_map = {
-        "wheelchair": 5, "elderly": 4, "visually_impaired": 3,
-        "pregnant": 2, "temporary": 1
+        "wheelchair": 5,      # 전동/수동 휠체어 (최고 지원 필요)
+        "elderly": 4,         # 고령자
+        "visually_impaired": 3, # 시각장애인
+        "pregnant": 2,        # 임산부
+        "temporary": 1        # 일시적 보행 약자 (기본 지원)
     }
     df_processed["user_type_encoded"] = df_processed["user_type"].map(user_type_map)
     
