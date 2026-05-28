@@ -16,8 +16,7 @@ from app.api.routes.mobility import router as mobility_router
 # feedback 라우터 import (피드백 저장용)
 from app.api.routes.feedback import router as feedback_router
 
-# AI 라우터 import (4주차 목표를 위해 추가)
-# 만약 아직 ai.py 파일이 없다면 이 줄을 주석처리하고 나중에 활성화
+# AI 라우터 import
 try:
     from app.api.routes.ai import router as ai_router
     AI_ROUTER_AVAILABLE = True
